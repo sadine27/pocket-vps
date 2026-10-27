@@ -1,0 +1,1522 @@
+{
+  "updatedAt": "2026-08-18T16:24:09.530Z",
+  "createdAt": "2026-08-13T12:54:51.337Z",
+  "id": "ELk9R3m7jeGK5VAF",
+  "name": "Demo: Review -> AI Draft -> Telegram Approve",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "3f2504e0-0001-4f89-b175-b41ea8000001",
+      "name": "Poll TG",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0020-4f89-b175-b41ea8000020",
+      "name": "Get Offset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8090/offset",
+        "sendBody": false,
+        "options": {
+          "timeout": 5000
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0012-4f89-b175-b41ea8000012",
+      "name": "Get Updates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/getUpdates?timeout=50&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D&offset=' + ($json.offset + 1) }}",
+        "sendBody": false,
+        "options": {
+          "timeout": 70000
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0013-4f89-b175-b41ea8000013",
+      "name": "Map Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const arr = ($json.result || []);\nreturn arr.map(function(u) { return { json: u }; });"
+      }
+    },
+    {
+      "id": "3f2504e0-0014-4f89-b175-b41ea8000014",
+      "name": "Dedup Updates",
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        0
+      ],
+      "parameters": {
+        "compare": "selectedFields",
+        "fieldsToCompare": "update_id",
+        "options": {}
+      }
+    },
+    {
+      "id": "3f2504e0-0002-4f89-b175-b41ea8000002",
+      "name": "Is Callback",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1000,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.callback_query ? 'callback' : 'review' }}",
+              "rightValue": "callback",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3f2504e0-0003-4f89-b175-b41ea8000003",
+      "name": "Parse Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "// One poll can carry several updates. A bare $json here would read item 0 only and\n// drop the rest, so loop explicitly.\nconst out = [];\n$input.all().forEach(function (item, i) {\n  const u = item.json;\n  const msg = u.message || {};\n  const t = msg.text || '';\n  // Photos, stickers, voice notes and joins are not reviews - skip them quietly\n  // rather than throwing, which would mark the whole execution failed.\n  if (!t) { return; }\n  const mm = t.match(/^([1-5])\\/5\\s+([\\s\\S]+)$/);\n  out.push({ json: {\n    stars: mm ? parseInt(mm[1], 10) : 3,\n    reviewText: mm ? mm[2] : t,\n    chatId: msg.chat.id,\n    updateId: u.update_id\n  }, pairedItem: { item: i } });\n});\nreturn out;"
+      }
+    },
+    {
+      "id": "3f2504e0-0004-4f89-b175-b41ea8000004",
+      "name": "Qwen Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1700,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8082/v1/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 900000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "3f2504e0-0005-4f89-b175-b41ea8000005",
+      "name": "Extract Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "// One model response per review in the batch, index-aligned with Parse Review.\nconst reviews = $('Parse Review').all();\nconst prompts = $('Build Prompt').all();\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const prev = reviews[i].json;\n  const r = item.json;\n  let c = (r && r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content) || '';\n\n  c = c.replace(/<think>[\\s\\S]*?<\\/think>/gi, '');\n  c = c.replace(/^\\s*(?:reply|response|answer|draft)\\s*:\\s*/i, '');\n  c = c.replace(/\\*\\*|__|`+/g, '');\n  c = c.replace(/^#+\\s*/gm, '');\n  c = c.replace(/\\s+/g, ' ').trim();\n  c = c.replace(/^[\"'\\u201c\\u201d]+|[\"'\\u201c\\u201d]+$/g, '').trim();\n  if (c.length > 4000) c = c.slice(0, 3997) + '...';\n\n  const failed = !c;\n  if (failed) c = 'Draft failed - the model did not respond. Please reply manually.';\n\n  let ragCount = 0;\n  try { ragCount = prompts[i].json.ragCount || 0; } catch (e) { ragCount = 0; }\n\n  out.push({ json: {\n    draft: c, failed: failed, stars: prev.stars, reviewText: prev.reviewText,\n    chatId: prev.chatId, updateId: prev.updateId, ragCount: ragCount\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+      }
+    },
+    {
+      "id": "3f2504e0-0006-4f89-b175-b41ea8000006",
+      "name": "Build Msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2100,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "const esc = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };\nconst stamp = Date.now();\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const d = item.json;\n  const tag = d.ragCount ? ' \\u00b7 ' + d.ragCount + ' similar' : ' \\u00b7 no RAG';\n  const head = d.failed ? '\\u26a0\\ufe0f Draft FAILED:' : '\\u270f\\ufe0f Draft reply:';\n  const text = '\\u2b50 ' + d.stars + '/5' + tag + '\\n' + esc(d.reviewText) +\n               '\\n\\n' + head + '\\n' + esc(d.draft);\n  // Suffix the index: a whole batch is built inside the same millisecond, so the bare\n  // timestamp would hand every message in it the same callback_data.\n  out.push({ json: {\n    chatId: d.chatId, text: text, rid: stamp + '_' + i, updateId: d.updateId\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+      }
+    },
+    {
+      "id": "3f2504e0-0007-4f89-b175-b41ea8000007",
+      "name": "Send Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2300,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: $json.text, parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: { inline_keyboard: [[{ text: '✅ Approve', callback_data: 'approve_' + $json.rid }, { text: '❌ Reject', callback_data: 'reject_' + $json.rid }]] } }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0021-4f89-b175-b41ea8000021",
+      "name": "Save Offset Msg",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2500,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8090/offset",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ offset: $('Build Msg').item.json.updateId }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0008-4f89-b175-b41ea8000008",
+      "name": "Handle Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Several taps can land in one poll, so loop - reading $json would act on the first\n// tap only and silently discard the rest (proven by execution 3736).\nconst unesc = function (s) { return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'); };\nconst esc = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const u = item.json;\n  const cb = u.callback_query || {};\n  const data = cb.data || '';\n  const from = (cb.from && cb.from.id) || 0;\n  const msg = cb.message || {};\n  // The draft is read back out of the message that was tapped, not from stored state.\n  // That is what makes an OLD message in the backlog still approvable.\n  const draftMatch = (msg.text || '').match(/Draft reply:\\n([\\s\\S]*)$/);\n  const draft = draftMatch ? unesc(draftMatch[1].trim()) : '';\n  const action = data.startsWith('approve_') ? 'approve' : (data.startsWith('reject_') ? 'reject' : 'unknown');\n\n  // A FAILED draft carries no \"Draft reply:\" section, so approving one would hand back\n  // an empty reply to paste. Say so instead.\n  let text;\n  if (action === 'approve') {\n    text = draft ? '\\u2705 APPROVED \\u2014 paste this reply on Google:\\n\\n' + esc(draft)\n                 : '\\u26a0\\ufe0f That message had no draft to approve.';\n  } else if (action === 'reject') {\n    text = '\\u274c Rejected \\u2014 nothing will be posted.';\n  } else {\n    text = 'Unknown button.';\n  }\n  const toast = action === 'approve' ? (draft ? 'Approved \\u2705' : 'No draft on that one')\n              : (action === 'reject' ? 'Rejected \\u274c' : 'Unknown button');\n\n  out.push({ json: {\n    action: action, from: from, draft: draft, text: text, toast: toast,\n    chatId: msg.chat ? msg.chat.id : '',\n    messageId: msg.message_id || 0,\n    cbId: cb.id || '',\n    authorized: from === YOUR_TELEGRAM_USER_ID,\n    updateId: u.update_id || 0\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+      }
+    },
+    {
+      "id": "3f2504e0-0009-4f89-b175-b41ea8000009",
+      "name": "Is Authorized",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1400,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.authorized ? 'yes' : 'no' }}",
+              "rightValue": "yes",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3f2504e0-0010-4f89-b175-b41ea8000010",
+      "name": "Send Final",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: $json.text, parse_mode: 'HTML' }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0022-4f89-b175-b41ea8000022",
+      "name": "Save Offset Ok",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8090/offset",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ offset: $('Handle Callback').item.json.updateId }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0011-4f89-b175-b41ea8000011",
+      "name": "Send Not Authorized",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: '⛔ Only approved team members can approve replies.' }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "3f2504e0-0023-4f89-b175-b41ea8000023",
+      "name": "Save Offset No",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8090/offset",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ offset: $('Handle Callback').item.json.updateId }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8082/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.reviewText, k: 24, business_id: 'b1' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "40c319ef-5cb4-4393-9a88-1bc5dd35a7cf",
+      "name": "RAG Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1330,
+        -100
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the RAG-grounded prompt: system rules + tone + retrieved few-shot pairs.\n// Retrieval is best-effort - if RAG Search failed (gateway down) pairs is empty and\n// we fall back to a zero-shot prompt rather than dropping the review on the floor.\n//\n// SIZE BUDGET (measured 2026-08-18): the phone reads a prompt at 2.83 tok/s and writes\n// at 1.94 tok/s, and n8n aborts the HTTP request at 300s regardless of the node's own\n// timeout setting. 8 examples at 300 chars = 885 tokens = 313s of reading alone, which\n// is what made the first real draft fail. Keep the prompt near 475 tokens.\nconst NAME = 'T3 Thakali';   // full name: T3 Thakali & Multi Food Gallery\nconst TONE = 'warm, humble, family-run; never defensive';\n\nconst cut = function (s, n) {\n  s = String(s || '').replace(/\\s+/g, ' ').trim();\n  return s.length > n ? s.slice(0, n) + '\\u2026' : s;\n};\n\n// GLOSSARY. Generated by apply-glossary.js - edit there, not here.\n// Only the entries that MATCH the review in hand are sent, so an entry that never\n// fires costs nothing. That is why rare-but-severe words (dhunga = stone, appearing\n// in 1 of 1352 real reviews) are worth carrying.\nconst GLOSS = [[\"dhunga|dhungaa|dhungo\",\"a stone/pebble\"],[\"kapal|kesh\",\"hair\"],[\"kira|kiraa\",\"an insect/worm\"],[\"jhinga|jhingaa|jhinge\",\"a fly\"],[\"makura\",\"a spider\"],[\"fohor|fohar|fohori\",\"dirty/filthy\"],[\"safa|sapha\",\"clean\"],[\"baasi|basi\",\"stale/left over\"],[\"sadeko|kuhiyeko|bigreko\",\"rotten/spoiled\"],[\"gandha|gandhaune\",\"a bad smell\"],[\"birami\",\"sick/ill\"],[\"banta|bantaa\",\"vomiting\"],[\"jwaro\",\"fever\"],[\"mitho|mito|mitho\",\"tasty\"],[\"amitho|amito\",\"not tasty\"],[\"swad|swaad\",\"taste\"],[\"nunilo|nunilo\",\"too salty\"],[\"noon|nun\",\"salt\"],[\"piro|piro\",\"spicy hot\"],[\"guliyo\",\"sweet\"],[\"amilo\",\"sour\"],[\"tito\",\"bitter\"],[\"chiso|chiso\",\"cold\"],[\"tato|taato\",\"hot (temperature)\"],[\"kachho|kaccha|nagaleko\",\"raw/undercooked\"],[\"poleko|jaleko\",\"burnt\"],[\"khana|khaana|khanaa\",\"food/a meal\"],[\"khaja|khaaja\",\"a snack\"],[\"bhat|bhaat\",\"rice\"],[\"dal|daal\",\"lentil soup\"],[\"sabji|tarkari|sabzi\",\"vegetable curry\"],[\"masu|maasu\",\"meat\"],[\"kukhura\",\"chicken\"],[\"khasi\",\"mutton\"],[\"machha|maccha\",\"fish\"],[\"achar|achaar\",\"pickle\"],[\"dahi\",\"curd/yoghurt\"],[\"jhol\",\"gravy/broth\"],[\"momo|momos|momocha\",\"dumplings\"],[\"sekuwa\",\"grilled meat\"],[\"thukpa\",\"noodle soup\"],[\"sukuti\",\"dried meat\"],[\"gundruk\",\"fermented greens\"],[\"dhido|dhedo|dhindo\",\"a millet/buckwheat staple\"],[\"aloo|alu\",\"potato\"],[\"thali|thakali set\",\"a platter meal\"],[\"chiya|chiyaa\",\"tea\"],[\"lassi\",\"a yoghurt drink\"],[\"roti\",\"flatbread\"],[\"paani\",\"water\"],[\"mahango|mahngo|maango\",\"expensive\"],[\"sasto\",\"cheap\"],[\"paisa|paisaa\",\"money\"],[\"thagyo|thageko|thagi\",\"cheated/overcharged\"],[\"dhilo|dhila\",\"slow/late\"],[\"chito|chhito\",\"fast/quickly\"],[\"sewa|sarbis|sebha\",\"service\"],[\"kaam\",\"work\"],[\"thap|thapp\",\"a refill/extra helping\"],[\"pugena|pugdaina\",\"not enough\"],[\"sodnu|sodhda|sodhe\",\"to ask\"],[\"parkhinu|kurnu|kureko\",\"to wait\"],[\"aayena|aaena\",\"did not come\"],[\"diyena|dienan\",\"did not give\"],[\"badtamiji|badtameez|badmasi\",\"rude/ill-mannered\"],[\"ghamandi\",\"arrogant\"],[\"byabahar|byavahar|bebhar\",\"behaviour\"],[\"bolyo|bolne|bolchan\",\"spoke/speaks\"],[\"helchakryai|waasta\",\"neglect/not caring\"],[\"ramro|ramrai|rmro\",\"good\"],[\"naramro\",\"bad\"],[\"kharab|kharaab\",\"bad/spoiled\"],[\"bekar|bekaar\",\"useless\"],[\"jhur\",\"lousy\"],[\"dami|damii\",\"great\"],[\"ekdam|ekdum|ekdamai\",\"very/completely\"],[\"dherai|dhrai\",\"a lot/very\"],[\"sarai|sarhai\",\"very\"],[\"sabai\",\"all/everything\"],[\"thik|thikai\",\"okay/fine\"],[\"matra|matrai\",\"only\"],[\"manche|manxe|manis\",\"person\"],[\"sathi|saathi\",\"friend\"],[\"haru\",\"plural marker\"],[\"thiyo|thiye\",\"was/were\"],[\"bhayo|bhaye\",\"happened/became\"],[\"aayo|aae\",\"came\"],[\"gayo|gaye\",\"went\"],[\"diyo|diye\",\"gave\"],[\"garyo|gare|garnu\",\"did/to do\"],[\"lagyo|laagyo|lageyo\",\"felt/seemed\"],[\"cha|chha|xa\",\"is\"],[\"chaina|xaina|chhaina\",\"is NOT / there is none\"],[\"ani\",\"and/then\"],[\"tara\",\"but\"],[\"pani|poni|ponii\",\"also/too (or: water)\"],[\"malai\",\"to me\"],[\"hami|hamro|hamile\",\"we/our\"],[\"yaha|yahan|yaha ko\",\"here\"],[\"kina\",\"why\"],[\"kasto|kasari\",\"what kind of/how\"],[\"jasto\",\"like/as\"],[\"pheri|feri\",\"again\"],[\"sadhai\",\"always\"],[\"najik|najikai\",\"near\"],[\"gunaso\",\"a complaint\"],[\"mafi|maaf\",\"apology/forgiveness\"],[\"dhanyabad|dhanyawad\",\"thank you\"],[\"namaste|namaskar\",\"a greeting\"],[\"chahi|chai\",\"as for\"],[\"euta|euta\",\"one\"]];\nconst HONORIFIC = /\\b(?:dai|daju|bhai|vai|didi|bdr|bhadur|bhadr|badhur|bahadur)\\b/i;\nconst MAX_TERMS = 10;   // see the worst-case budget in apply-glossary.js --test\n\nconst decode = function (reviewText) {\n  const flat = ' ' + String(reviewText || '').toLowerCase().replace(/[^a-z0-9\\s]/g, ' ') + ' ';\n  const seen = {};\n  const hits = [];\n  for (let i = 0; i < GLOSS.length && hits.length < MAX_TERMS; i++) {\n    const meaning = GLOSS[i][1];\n    if (seen[meaning]) continue;\n    const m = flat.match(new RegExp('\\\\b(' + GLOSS[i][0] + ')\\\\b'));\n    if (!m) continue;\n    seen[meaning] = 1;\n    // Show the spelling the guest actually used, not the canonical one.\n    hits.push(m[1] + ' = ' + meaning);\n  }\n  const lines = [];\n  if (hits.length) lines.push('Word meanings: ' + hits.join('; '));\n  // Tej Bahadur, the security guard, is named in ~55% of reviews under six spellings.\n  // Without this the model thanks guests for \"our BDR service\".\n  if (HONORIFIC.test(String(reviewText || ''))) {\n    lines.push(\"Names: BDR/bhadur/bhadr = the surname Bahadur (Tej Bahadur is our security guard). dai/daju/bhai/vai/didi are polite address, not names.\");\n  }\n  return lines;\n};\n\n// One item per review in the batch, index-aligned with Parse Review.\nconst reviews = $('Parse Review').all();\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const prev = reviews[i].json;\n  const pairs = (item.json && Array.isArray(item.json.pairs)) ? item.json.pairs : [];\n  const negative = prev.stars <= 3;\n\n  // Show examples from the SAME band only. This began as the fix for replies like\n  // \"We're glad our food reminded you of Lalgadh\" on a 2-star review. Complaints now\n  // carry no examples at all (see below), so what this still guards is the praise\n  // side: a complaint example sitting in front of a 5-star review.\n  // Pairs ingested before the band tag exists have no .band, so fall back to all.\n  const sameBand = pairs.filter(function (p) {\n    return p.band ? (negative ? p.band === 'complaint' : p.band === 'praise') : false;\n  });\n  const chosen = sameBand.length ? sameBand : pairs;\n\n  // HOW MANY EXAMPLES - BAND-DEPENDENT, AND ON A COMPLAINT IT IS ZERO.\n  //\n  // Measured 2026-08-18 on \"khana ma dhunga thiyo, staff pani rude\" (dhunga = stone),\n  // with the glossary decoding dhunga correctly in every single run:\n  //     3 examples -> \"the food was not ready\"\n  //     3 examples, reworded rules -> \"the food was cold\"\n  //     1 example  -> \"your food was cold\"\n  //     0 examples -> \"your meal had a stone in it\"\n  // A retrieved reply pulls harder than the glossary, the rules and the review text\n  // combined. One example is already too many, so on the reputation-critical path the\n  // examples do not get a vote at all. This is not a tuning knob to be re-opened.\n  //\n  // Praise is the opposite. Three examples produced the warmer reply, and it picked up\n  // the guest's own address form (\"Tej Dai\" rather than the full name); boilerplate on\n  // praise is acceptable here by design. What it costs is time: praise@3 measured 236.9s\n  // against n8n's hard 300s ceiling, leaving 63s. A long review spends that margin on\n  // prompt tokens, so it drops to 2 rather than discovering the abort in production.\n  // Complaints carry no examples and land near 150s, so they are never at risk.\n  const LONG_REVIEW = 320;   // chars; ~63s of margin at 2.83 tok/s buys about this much\n  const nExamples = negative ? 0\n    : (String(prev.reviewText || '').length > LONG_REVIEW ? 2 : 3);\n\n  let examples = '';\n  chosen.slice(0, nExamples).forEach(function (p, n) {\n    examples += '\\n[' + (n + 1) + '] Review: \"' + cut(p.review, 100) + '\"\\nReply: \"' + cut(p.reply, 200) + '\"\\n';\n  });\n\n  const shared = [\n    'You are the Google Reviews responder for ' + NAME + ', a Thakali restaurant in Nepal.',\n    'Rules:',\n    '- Reply in English always. The review may be Nepali, romanized Nepali, Hindi or English slang; understand it fully, answer in English. A \"Word meanings\" line translates words the guest used - treat those meanings as part of what they actually said, but never quote a meaning back as a phrase in your reply, and never address or describe anyone as brother, sister, elder or younger.',\n    '- 1-3 sentences, max 80 words. Warm, natural. No markdown, no emoji, no sign-off.',\n    '- Never argue, never blame, never promise refunds, never mention the review language or that you are an AI.',\n    'Tone: ' + TONE\n  ];\n\n  // The negative branch is the reputation-critical path and gets hard prohibitions,\n  // because this is precisely where the human replies went wrong.\n  const banded = negative ? [\n    'This review is ' + prev.stars + '/5. It is a complaint. These override everything above:',\n    '- Do NOT open with \"Thank you\". Open by naming what went wrong.',\n    '- Never say glad, delighted, happy or pleased about anything here.',\n    '- Name the specific thing they complained about, in plain English, using the Word meanings where given. Never soften a concrete complaint into a vague one.',\n    '- Apologize once, no excuses, then state ONE concrete action being taken.',\n    '- If it is sarcastic or insulting, answer the complaint underneath it. Never mistake an insult for a compliment.'\n  ] : [\n    'This review is ' + prev.stars + '/5. Thank the guest and mention the specific thing they praised - a dish, a staff member by name, or the service.'\n  ];\n\n  const system = shared.concat(banded).concat(\n    examples ? ['Examples from our own past replies - match tone and structure only, never copy:' + examples] : []\n  ).join('\\n');\n\n  // The decoding aid sits next to the text it decodes, in the user turn.\n  const aid = decode(prev.reviewText);\n  const user = ['Review (original text): ' + prev.reviewText, 'Stars: ' + prev.stars + '/5']\n    .concat(aid).join('\\n');\n\n  out.push({ json: {\n    ragCount: chosen.length,\n    shown: Math.min(chosen.length, nExamples),\n    band: negative ? 'complaint' : 'praise',\n    glossLines: aid.length,\n    promptChars: system.length + user.length,\n    body: {\n      model: 'qwen3.5-4b',\n      stream: false,\n      max_tokens: 120,\n      temperature: 0.4,\n      messages: [{ role: 'system', content: system }, { role: 'user', content: user }]\n    }\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+      },
+      "id": "ab22402c-3700-4a99-9d95-8ff68e4c09c9",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8090/offset",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ offset: $json.update_id }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "c3e3b542-4742-4be2-9937-51883eed5349",
+      "name": "Ack Offset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        830,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 'Ack Offset' is an HTTP node: its response replaced the item data.\n// Re-attach the original Telegram updates so update_id survives to Dedup.\nreturn $('Map Updates').all();"
+      },
+      "id": "df55b5a3-0eb5-4f13-a51b-cf1fcfcef2c9",
+      "name": "Restore Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        20
+      ]
+    },
+    {
+      "name": "Answer Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        -20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/answerCallbackQuery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ callback_query_id: $json.cbId, text: $json.toast }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "7aadd490-7db4-4371-9835-8d71c8a6edfe"
+    },
+    {
+      "name": "Restore Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "return $('Handle Callback').all();"
+      },
+      "id": "f486056b-fb03-4805-b9fc-a6589bf02999"
+    },
+    {
+      "name": "Clear Buttons",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/editMessageReplyMarkup",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Handle Callback').item.json.chatId, message_id: $('Handle Callback').item.json.messageId, reply_markup: { inline_keyboard: [] } }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "id": "2576170c-9d81-43f9-a8e9-763810efbe6a"
+    }
+  ],
+  "connections": {
+    "Poll TG": {
+      "main": [
+        [
+          {
+            "node": "Get Offset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Offset": {
+      "main": [
+        [
+          {
+            "node": "Get Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Updates": {
+      "main": [
+        [
+          {
+            "node": "Map Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Updates": {
+      "main": [
+        [
+          {
+            "node": "Ack Offset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Updates": {
+      "main": [
+        [
+          {
+            "node": "Is Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Callback": {
+      "main": [
+        [
+          {
+            "node": "Handle Callback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Review": {
+      "main": [
+        [
+          {
+            "node": "RAG Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qwen Draft": {
+      "main": [
+        [
+          {
+            "node": "Extract Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Draft": {
+      "main": [
+        [
+          {
+            "node": "Build Msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Msg": {
+      "main": [
+        [
+          {
+            "node": "Send Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Draft": {
+      "main": [
+        [
+          {
+            "node": "Save Offset Msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Callback": {
+      "main": [
+        [
+          {
+            "node": "Answer Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Authorized": {
+      "main": [
+        [
+          {
+            "node": "Send Final",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Not Authorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Final": {
+      "main": [
+        [
+          {
+            "node": "Save Offset Ok",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Not Authorized": {
+      "main": [
+        [
+          {
+            "node": "Save Offset No",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RAG Search": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Qwen Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack Offset": {
+      "main": [
+        [
+          {
+            "node": "Restore Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Update": {
+      "main": [
+        [
+          {
+            "node": "Dedup Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Callback": {
+      "main": [
+        [
+          {
+            "node": "Restore Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Callback": {
+      "main": [
+        [
+          {
+            "node": "Is Authorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Offset Ok": {
+      "main": [
+        [
+          {
+            "node": "Clear Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": {
+    "node:Poll TG": {
+      "recurrenceRules": []
+    },
+    "global": {
+      "offset": 115989611
+    }
+  },
+  "meta": null,
+  "pinData": {},
+  "versionId": "54e73d4e-0db3-4c88-b201-26d24d510626",
+  "activeVersionId": "54e73d4e-0db3-4c88-b201-26d24d510626",
+  "versionCounter": 96,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-08-13T12:54:51.352Z",
+      "createdAt": "2026-08-13T12:54:51.352Z",
+      "role": "workflow:owner",
+      "workflowId": "ELk9R3m7jeGK5VAF",
+      "projectId": "cNHsZ5Y26Cx0U0O7",
+      "project": {
+        "updatedAt": "2026-08-13T11:38:57.274Z",
+        "createdAt": "2026-08-13T11:37:24.897Z",
+        "id": "cNHsZ5Y26Cx0U0O7",
+        "name": "Author",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "86cb99bf-d98e-4730-9378-98908dd9601d"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-08-18T16:24:09.545Z",
+    "createdAt": "2026-08-18T16:24:09.545Z",
+    "versionId": "54e73d4e-0db3-4c88-b201-26d24d510626",
+    "workflowId": "ELk9R3m7jeGK5VAF",
+    "nodes": [
+      {
+        "id": "3f2504e0-0001-4f89-b175-b41ea8000001",
+        "name": "Poll TG",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 1
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0020-4f89-b175-b41ea8000020",
+        "name": "Get Offset",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          200,
+          0
+        ],
+        "parameters": {
+          "method": "GET",
+          "url": "http://127.0.0.1:8090/offset",
+          "sendBody": false,
+          "options": {
+            "timeout": 5000
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0012-4f89-b175-b41ea8000012",
+        "name": "Get Updates",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          400,
+          0
+        ],
+        "parameters": {
+          "method": "GET",
+          "url": "={{ 'https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/getUpdates?timeout=50&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D&offset=' + ($json.offset + 1) }}",
+          "sendBody": false,
+          "options": {
+            "timeout": 70000
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0013-4f89-b175-b41ea8000013",
+        "name": "Map Updates",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          600,
+          0
+        ],
+        "parameters": {
+          "jsCode": "const arr = ($json.result || []);\nreturn arr.map(function(u) { return { json: u }; });"
+        }
+      },
+      {
+        "id": "3f2504e0-0014-4f89-b175-b41ea8000014",
+        "name": "Dedup Updates",
+        "type": "n8n-nodes-base.removeDuplicates",
+        "typeVersion": 1.1,
+        "position": [
+          800,
+          0
+        ],
+        "parameters": {
+          "compare": "selectedFields",
+          "fieldsToCompare": "update_id",
+          "options": {}
+        }
+      },
+      {
+        "id": "3f2504e0-0002-4f89-b175-b41ea8000002",
+        "name": "Is Callback",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          1000,
+          0
+        ],
+        "parameters": {
+          "conditions": {
+            "combinator": "and",
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "loose",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.callback_query ? 'callback' : 'review' }}",
+                "rightValue": "callback",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                }
+              }
+            ]
+          },
+          "options": {}
+        }
+      },
+      {
+        "id": "3f2504e0-0003-4f89-b175-b41ea8000003",
+        "name": "Parse Review",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1200,
+          -100
+        ],
+        "parameters": {
+          "jsCode": "// One poll can carry several updates. A bare $json here would read item 0 only and\n// drop the rest, so loop explicitly.\nconst out = [];\n$input.all().forEach(function (item, i) {\n  const u = item.json;\n  const msg = u.message || {};\n  const t = msg.text || '';\n  // Photos, stickers, voice notes and joins are not reviews - skip them quietly\n  // rather than throwing, which would mark the whole execution failed.\n  if (!t) { return; }\n  const mm = t.match(/^([1-5])\\/5\\s+([\\s\\S]+)$/);\n  out.push({ json: {\n    stars: mm ? parseInt(mm[1], 10) : 3,\n    reviewText: mm ? mm[2] : t,\n    chatId: msg.chat.id,\n    updateId: u.update_id\n  }, pairedItem: { item: i } });\n});\nreturn out;"
+        }
+      },
+      {
+        "id": "3f2504e0-0004-4f89-b175-b41ea8000004",
+        "name": "Qwen Draft",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1700,
+          -100
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:8082/v1/chat/completions",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify($json.body) }}",
+          "options": {
+            "timeout": 900000
+          }
+        },
+        "onError": "continueRegularOutput"
+      },
+      {
+        "id": "3f2504e0-0005-4f89-b175-b41ea8000005",
+        "name": "Extract Draft",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1900,
+          -100
+        ],
+        "parameters": {
+          "jsCode": "// One model response per review in the batch, index-aligned with Parse Review.\nconst reviews = $('Parse Review').all();\nconst prompts = $('Build Prompt').all();\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const prev = reviews[i].json;\n  const r = item.json;\n  let c = (r && r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content) || '';\n\n  c = c.replace(/<think>[\\s\\S]*?<\\/think>/gi, '');\n  c = c.replace(/^\\s*(?:reply|response|answer|draft)\\s*:\\s*/i, '');\n  c = c.replace(/\\*\\*|__|`+/g, '');\n  c = c.replace(/^#+\\s*/gm, '');\n  c = c.replace(/\\s+/g, ' ').trim();\n  c = c.replace(/^[\"'\\u201c\\u201d]+|[\"'\\u201c\\u201d]+$/g, '').trim();\n  if (c.length > 4000) c = c.slice(0, 3997) + '...';\n\n  const failed = !c;\n  if (failed) c = 'Draft failed - the model did not respond. Please reply manually.';\n\n  let ragCount = 0;\n  try { ragCount = prompts[i].json.ragCount || 0; } catch (e) { ragCount = 0; }\n\n  out.push({ json: {\n    draft: c, failed: failed, stars: prev.stars, reviewText: prev.reviewText,\n    chatId: prev.chatId, updateId: prev.updateId, ragCount: ragCount\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+        }
+      },
+      {
+        "id": "3f2504e0-0006-4f89-b175-b41ea8000006",
+        "name": "Build Msg",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2100,
+          -100
+        ],
+        "parameters": {
+          "jsCode": "const esc = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };\nconst stamp = Date.now();\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const d = item.json;\n  const tag = d.ragCount ? ' \\u00b7 ' + d.ragCount + ' similar' : ' \\u00b7 no RAG';\n  const head = d.failed ? '\\u26a0\\ufe0f Draft FAILED:' : '\\u270f\\ufe0f Draft reply:';\n  const text = '\\u2b50 ' + d.stars + '/5' + tag + '\\n' + esc(d.reviewText) +\n               '\\n\\n' + head + '\\n' + esc(d.draft);\n  // Suffix the index: a whole batch is built inside the same millisecond, so the bare\n  // timestamp would hand every message in it the same callback_data.\n  out.push({ json: {\n    chatId: d.chatId, text: text, rid: stamp + '_' + i, updateId: d.updateId\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+        }
+      },
+      {
+        "id": "3f2504e0-0007-4f89-b175-b41ea8000007",
+        "name": "Send Draft",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          2300,
+          -100
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/sendMessage",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: $json.text, parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: { inline_keyboard: [[{ text: '✅ Approve', callback_data: 'approve_' + $json.rid }, { text: '❌ Reject', callback_data: 'reject_' + $json.rid }]] } }) }}",
+          "options": {
+            "timeout": 15000
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0021-4f89-b175-b41ea8000021",
+        "name": "Save Offset Msg",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          2500,
+          -100
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:8090/offset",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ offset: $('Build Msg').item.json.updateId }) }}",
+          "options": {
+            "timeout": 5000
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0008-4f89-b175-b41ea8000008",
+        "name": "Handle Callback",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1200,
+          100
+        ],
+        "parameters": {
+          "jsCode": "// Several taps can land in one poll, so loop - reading $json would act on the first\n// tap only and silently discard the rest (proven by execution 3736).\nconst unesc = function (s) { return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'); };\nconst esc = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const u = item.json;\n  const cb = u.callback_query || {};\n  const data = cb.data || '';\n  const from = (cb.from && cb.from.id) || 0;\n  const msg = cb.message || {};\n  // The draft is read back out of the message that was tapped, not from stored state.\n  // That is what makes an OLD message in the backlog still approvable.\n  const draftMatch = (msg.text || '').match(/Draft reply:\\n([\\s\\S]*)$/);\n  const draft = draftMatch ? unesc(draftMatch[1].trim()) : '';\n  const action = data.startsWith('approve_') ? 'approve' : (data.startsWith('reject_') ? 'reject' : 'unknown');\n\n  // A FAILED draft carries no \"Draft reply:\" section, so approving one would hand back\n  // an empty reply to paste. Say so instead.\n  let text;\n  if (action === 'approve') {\n    text = draft ? '\\u2705 APPROVED \\u2014 paste this reply on Google:\\n\\n' + esc(draft)\n                 : '\\u26a0\\ufe0f That message had no draft to approve.';\n  } else if (action === 'reject') {\n    text = '\\u274c Rejected \\u2014 nothing will be posted.';\n  } else {\n    text = 'Unknown button.';\n  }\n  const toast = action === 'approve' ? (draft ? 'Approved \\u2705' : 'No draft on that one')\n              : (action === 'reject' ? 'Rejected \\u274c' : 'Unknown button');\n\n  out.push({ json: {\n    action: action, from: from, draft: draft, text: text, toast: toast,\n    chatId: msg.chat ? msg.chat.id : '',\n    messageId: msg.message_id || 0,\n    cbId: cb.id || '',\n    authorized: from === YOUR_TELEGRAM_USER_ID,\n    updateId: u.update_id || 0\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+        }
+      },
+      {
+        "id": "3f2504e0-0009-4f89-b175-b41ea8000009",
+        "name": "Is Authorized",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          1400,
+          100
+        ],
+        "parameters": {
+          "conditions": {
+            "combinator": "and",
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "loose",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.authorized ? 'yes' : 'no' }}",
+                "rightValue": "yes",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                }
+              }
+            ]
+          },
+          "options": {}
+        }
+      },
+      {
+        "id": "3f2504e0-0010-4f89-b175-b41ea8000010",
+        "name": "Send Final",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1600,
+          100
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/sendMessage",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: $json.text, parse_mode: 'HTML' }) }}",
+          "options": {
+            "timeout": 15000
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0022-4f89-b175-b41ea8000022",
+        "name": "Save Offset Ok",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1800,
+          100
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:8090/offset",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ offset: $('Handle Callback').item.json.updateId }) }}",
+          "options": {
+            "timeout": 5000
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0011-4f89-b175-b41ea8000011",
+        "name": "Send Not Authorized",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1600,
+          220
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/sendMessage",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: '⛔ Only approved team members can approve replies.' }) }}",
+          "options": {
+            "timeout": 15000
+          }
+        }
+      },
+      {
+        "id": "3f2504e0-0023-4f89-b175-b41ea8000023",
+        "name": "Save Offset No",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1800,
+          220
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:8090/offset",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ offset: $('Handle Callback').item.json.updateId }) }}",
+          "options": {
+            "timeout": 5000
+          }
+        }
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:8082/search",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ text: $json.reviewText, k: 24, business_id: 'b1' }) }}",
+          "options": {
+            "timeout": 120000
+          }
+        },
+        "id": "40c319ef-5cb4-4393-9a88-1bc5dd35a7cf",
+        "name": "RAG Search",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1330,
+          -100
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Build the RAG-grounded prompt: system rules + tone + retrieved few-shot pairs.\n// Retrieval is best-effort - if RAG Search failed (gateway down) pairs is empty and\n// we fall back to a zero-shot prompt rather than dropping the review on the floor.\n//\n// SIZE BUDGET (measured 2026-08-18): the phone reads a prompt at 2.83 tok/s and writes\n// at 1.94 tok/s, and n8n aborts the HTTP request at 300s regardless of the node's own\n// timeout setting. 8 examples at 300 chars = 885 tokens = 313s of reading alone, which\n// is what made the first real draft fail. Keep the prompt near 475 tokens.\nconst NAME = 'T3 Thakali';   // full name: T3 Thakali & Multi Food Gallery\nconst TONE = 'warm, humble, family-run; never defensive';\n\nconst cut = function (s, n) {\n  s = String(s || '').replace(/\\s+/g, ' ').trim();\n  return s.length > n ? s.slice(0, n) + '\\u2026' : s;\n};\n\n// GLOSSARY. Generated by apply-glossary.js - edit there, not here.\n// Only the entries that MATCH the review in hand are sent, so an entry that never\n// fires costs nothing. That is why rare-but-severe words (dhunga = stone, appearing\n// in 1 of 1352 real reviews) are worth carrying.\nconst GLOSS = [[\"dhunga|dhungaa|dhungo\",\"a stone/pebble\"],[\"kapal|kesh\",\"hair\"],[\"kira|kiraa\",\"an insect/worm\"],[\"jhinga|jhingaa|jhinge\",\"a fly\"],[\"makura\",\"a spider\"],[\"fohor|fohar|fohori\",\"dirty/filthy\"],[\"safa|sapha\",\"clean\"],[\"baasi|basi\",\"stale/left over\"],[\"sadeko|kuhiyeko|bigreko\",\"rotten/spoiled\"],[\"gandha|gandhaune\",\"a bad smell\"],[\"birami\",\"sick/ill\"],[\"banta|bantaa\",\"vomiting\"],[\"jwaro\",\"fever\"],[\"mitho|mito|mitho\",\"tasty\"],[\"amitho|amito\",\"not tasty\"],[\"swad|swaad\",\"taste\"],[\"nunilo|nunilo\",\"too salty\"],[\"noon|nun\",\"salt\"],[\"piro|piro\",\"spicy hot\"],[\"guliyo\",\"sweet\"],[\"amilo\",\"sour\"],[\"tito\",\"bitter\"],[\"chiso|chiso\",\"cold\"],[\"tato|taato\",\"hot (temperature)\"],[\"kachho|kaccha|nagaleko\",\"raw/undercooked\"],[\"poleko|jaleko\",\"burnt\"],[\"khana|khaana|khanaa\",\"food/a meal\"],[\"khaja|khaaja\",\"a snack\"],[\"bhat|bhaat\",\"rice\"],[\"dal|daal\",\"lentil soup\"],[\"sabji|tarkari|sabzi\",\"vegetable curry\"],[\"masu|maasu\",\"meat\"],[\"kukhura\",\"chicken\"],[\"khasi\",\"mutton\"],[\"machha|maccha\",\"fish\"],[\"achar|achaar\",\"pickle\"],[\"dahi\",\"curd/yoghurt\"],[\"jhol\",\"gravy/broth\"],[\"momo|momos|momocha\",\"dumplings\"],[\"sekuwa\",\"grilled meat\"],[\"thukpa\",\"noodle soup\"],[\"sukuti\",\"dried meat\"],[\"gundruk\",\"fermented greens\"],[\"dhido|dhedo|dhindo\",\"a millet/buckwheat staple\"],[\"aloo|alu\",\"potato\"],[\"thali|thakali set\",\"a platter meal\"],[\"chiya|chiyaa\",\"tea\"],[\"lassi\",\"a yoghurt drink\"],[\"roti\",\"flatbread\"],[\"paani\",\"water\"],[\"mahango|mahngo|maango\",\"expensive\"],[\"sasto\",\"cheap\"],[\"paisa|paisaa\",\"money\"],[\"thagyo|thageko|thagi\",\"cheated/overcharged\"],[\"dhilo|dhila\",\"slow/late\"],[\"chito|chhito\",\"fast/quickly\"],[\"sewa|sarbis|sebha\",\"service\"],[\"kaam\",\"work\"],[\"thap|thapp\",\"a refill/extra helping\"],[\"pugena|pugdaina\",\"not enough\"],[\"sodnu|sodhda|sodhe\",\"to ask\"],[\"parkhinu|kurnu|kureko\",\"to wait\"],[\"aayena|aaena\",\"did not come\"],[\"diyena|dienan\",\"did not give\"],[\"badtamiji|badtameez|badmasi\",\"rude/ill-mannered\"],[\"ghamandi\",\"arrogant\"],[\"byabahar|byavahar|bebhar\",\"behaviour\"],[\"bolyo|bolne|bolchan\",\"spoke/speaks\"],[\"helchakryai|waasta\",\"neglect/not caring\"],[\"ramro|ramrai|rmro\",\"good\"],[\"naramro\",\"bad\"],[\"kharab|kharaab\",\"bad/spoiled\"],[\"bekar|bekaar\",\"useless\"],[\"jhur\",\"lousy\"],[\"dami|damii\",\"great\"],[\"ekdam|ekdum|ekdamai\",\"very/completely\"],[\"dherai|dhrai\",\"a lot/very\"],[\"sarai|sarhai\",\"very\"],[\"sabai\",\"all/everything\"],[\"thik|thikai\",\"okay/fine\"],[\"matra|matrai\",\"only\"],[\"manche|manxe|manis\",\"person\"],[\"sathi|saathi\",\"friend\"],[\"haru\",\"plural marker\"],[\"thiyo|thiye\",\"was/were\"],[\"bhayo|bhaye\",\"happened/became\"],[\"aayo|aae\",\"came\"],[\"gayo|gaye\",\"went\"],[\"diyo|diye\",\"gave\"],[\"garyo|gare|garnu\",\"did/to do\"],[\"lagyo|laagyo|lageyo\",\"felt/seemed\"],[\"cha|chha|xa\",\"is\"],[\"chaina|xaina|chhaina\",\"is NOT / there is none\"],[\"ani\",\"and/then\"],[\"tara\",\"but\"],[\"pani|poni|ponii\",\"also/too (or: water)\"],[\"malai\",\"to me\"],[\"hami|hamro|hamile\",\"we/our\"],[\"yaha|yahan|yaha ko\",\"here\"],[\"kina\",\"why\"],[\"kasto|kasari\",\"what kind of/how\"],[\"jasto\",\"like/as\"],[\"pheri|feri\",\"again\"],[\"sadhai\",\"always\"],[\"najik|najikai\",\"near\"],[\"gunaso\",\"a complaint\"],[\"mafi|maaf\",\"apology/forgiveness\"],[\"dhanyabad|dhanyawad\",\"thank you\"],[\"namaste|namaskar\",\"a greeting\"],[\"chahi|chai\",\"as for\"],[\"euta|euta\",\"one\"]];\nconst HONORIFIC = /\\b(?:dai|daju|bhai|vai|didi|bdr|bhadur|bhadr|badhur|bahadur)\\b/i;\nconst MAX_TERMS = 10;   // see the worst-case budget in apply-glossary.js --test\n\nconst decode = function (reviewText) {\n  const flat = ' ' + String(reviewText || '').toLowerCase().replace(/[^a-z0-9\\s]/g, ' ') + ' ';\n  const seen = {};\n  const hits = [];\n  for (let i = 0; i < GLOSS.length && hits.length < MAX_TERMS; i++) {\n    const meaning = GLOSS[i][1];\n    if (seen[meaning]) continue;\n    const m = flat.match(new RegExp('\\\\b(' + GLOSS[i][0] + ')\\\\b'));\n    if (!m) continue;\n    seen[meaning] = 1;\n    // Show the spelling the guest actually used, not the canonical one.\n    hits.push(m[1] + ' = ' + meaning);\n  }\n  const lines = [];\n  if (hits.length) lines.push('Word meanings: ' + hits.join('; '));\n  // Tej Bahadur, the security guard, is named in ~55% of reviews under six spellings.\n  // Without this the model thanks guests for \"our BDR service\".\n  if (HONORIFIC.test(String(reviewText || ''))) {\n    lines.push(\"Names: BDR/bhadur/bhadr = the surname Bahadur (Tej Bahadur is our security guard). dai/daju/bhai/vai/didi are polite address, not names.\");\n  }\n  return lines;\n};\n\n// One item per review in the batch, index-aligned with Parse Review.\nconst reviews = $('Parse Review').all();\nconst out = [];\n\n$input.all().forEach(function (item, i) {\n  const prev = reviews[i].json;\n  const pairs = (item.json && Array.isArray(item.json.pairs)) ? item.json.pairs : [];\n  const negative = prev.stars <= 3;\n\n  // Show examples from the SAME band only. This began as the fix for replies like\n  // \"We're glad our food reminded you of Lalgadh\" on a 2-star review. Complaints now\n  // carry no examples at all (see below), so what this still guards is the praise\n  // side: a complaint example sitting in front of a 5-star review.\n  // Pairs ingested before the band tag exists have no .band, so fall back to all.\n  const sameBand = pairs.filter(function (p) {\n    return p.band ? (negative ? p.band === 'complaint' : p.band === 'praise') : false;\n  });\n  const chosen = sameBand.length ? sameBand : pairs;\n\n  // HOW MANY EXAMPLES - BAND-DEPENDENT, AND ON A COMPLAINT IT IS ZERO.\n  //\n  // Measured 2026-08-18 on \"khana ma dhunga thiyo, staff pani rude\" (dhunga = stone),\n  // with the glossary decoding dhunga correctly in every single run:\n  //     3 examples -> \"the food was not ready\"\n  //     3 examples, reworded rules -> \"the food was cold\"\n  //     1 example  -> \"your food was cold\"\n  //     0 examples -> \"your meal had a stone in it\"\n  // A retrieved reply pulls harder than the glossary, the rules and the review text\n  // combined. One example is already too many, so on the reputation-critical path the\n  // examples do not get a vote at all. This is not a tuning knob to be re-opened.\n  //\n  // Praise is the opposite. Three examples produced the warmer reply, and it picked up\n  // the guest's own address form (\"Tej Dai\" rather than the full name); boilerplate on\n  // praise is acceptable here by design. What it costs is time: praise@3 measured 236.9s\n  // against n8n's hard 300s ceiling, leaving 63s. A long review spends that margin on\n  // prompt tokens, so it drops to 2 rather than discovering the abort in production.\n  // Complaints carry no examples and land near 150s, so they are never at risk.\n  const LONG_REVIEW = 320;   // chars; ~63s of margin at 2.83 tok/s buys about this much\n  const nExamples = negative ? 0\n    : (String(prev.reviewText || '').length > LONG_REVIEW ? 2 : 3);\n\n  let examples = '';\n  chosen.slice(0, nExamples).forEach(function (p, n) {\n    examples += '\\n[' + (n + 1) + '] Review: \"' + cut(p.review, 100) + '\"\\nReply: \"' + cut(p.reply, 200) + '\"\\n';\n  });\n\n  const shared = [\n    'You are the Google Reviews responder for ' + NAME + ', a Thakali restaurant in Nepal.',\n    'Rules:',\n    '- Reply in English always. The review may be Nepali, romanized Nepali, Hindi or English slang; understand it fully, answer in English. A \"Word meanings\" line translates words the guest used - treat those meanings as part of what they actually said, but never quote a meaning back as a phrase in your reply, and never address or describe anyone as brother, sister, elder or younger.',\n    '- 1-3 sentences, max 80 words. Warm, natural. No markdown, no emoji, no sign-off.',\n    '- Never argue, never blame, never promise refunds, never mention the review language or that you are an AI.',\n    'Tone: ' + TONE\n  ];\n\n  // The negative branch is the reputation-critical path and gets hard prohibitions,\n  // because this is precisely where the human replies went wrong.\n  const banded = negative ? [\n    'This review is ' + prev.stars + '/5. It is a complaint. These override everything above:',\n    '- Do NOT open with \"Thank you\". Open by naming what went wrong.',\n    '- Never say glad, delighted, happy or pleased about anything here.',\n    '- Name the specific thing they complained about, in plain English, using the Word meanings where given. Never soften a concrete complaint into a vague one.',\n    '- Apologize once, no excuses, then state ONE concrete action being taken.',\n    '- If it is sarcastic or insulting, answer the complaint underneath it. Never mistake an insult for a compliment.'\n  ] : [\n    'This review is ' + prev.stars + '/5. Thank the guest and mention the specific thing they praised - a dish, a staff member by name, or the service.'\n  ];\n\n  const system = shared.concat(banded).concat(\n    examples ? ['Examples from our own past replies - match tone and structure only, never copy:' + examples] : []\n  ).join('\\n');\n\n  // The decoding aid sits next to the text it decodes, in the user turn.\n  const aid = decode(prev.reviewText);\n  const user = ['Review (original text): ' + prev.reviewText, 'Stars: ' + prev.stars + '/5']\n    .concat(aid).join('\\n');\n\n  out.push({ json: {\n    ragCount: chosen.length,\n    shown: Math.min(chosen.length, nExamples),\n    band: negative ? 'complaint' : 'praise',\n    glossLines: aid.length,\n    promptChars: system.length + user.length,\n    body: {\n      model: 'qwen3.5-4b',\n      stream: false,\n      max_tokens: 120,\n      temperature: 0.4,\n      messages: [{ role: 'system', content: system }, { role: 'user', content: user }]\n    }\n  }, pairedItem: { item: i } });\n});\n\nreturn out;"
+        },
+        "id": "ab22402c-3700-4a99-9d95-8ff68e4c09c9",
+        "name": "Build Prompt",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1500,
+          -100
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:8090/offset",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ offset: $json.update_id }) }}",
+          "options": {
+            "timeout": 5000
+          }
+        },
+        "id": "c3e3b542-4742-4be2-9937-51883eed5349",
+        "name": "Ack Offset",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          830,
+          20
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// 'Ack Offset' is an HTTP node: its response replaced the item data.\n// Re-attach the original Telegram updates so update_id survives to Dedup.\nreturn $('Map Updates').all();"
+        },
+        "id": "df55b5a3-0eb5-4f13-a51b-cf1fcfcef2c9",
+        "name": "Restore Update",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1000,
+          20
+        ]
+      },
+      {
+        "name": "Answer Callback",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1380,
+          -20
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/answerCallbackQuery",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ callback_query_id: $json.cbId, text: $json.toast }) }}",
+          "options": {
+            "timeout": 10000
+          }
+        },
+        "onError": "continueRegularOutput",
+        "id": "7aadd490-7db4-4371-9835-8d71c8a6edfe"
+      },
+      {
+        "name": "Restore Callback",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1560,
+          -20
+        ],
+        "parameters": {
+          "jsCode": "return $('Handle Callback').all();"
+        },
+        "id": "f486056b-fb03-4805-b9fc-a6589bf02999"
+      },
+      {
+        "name": "Clear Buttons",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1380,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.telegram.org/botTELEGRAM_BOT_TOKEN_PLACEHOLDER/editMessageReplyMarkup",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ chat_id: $('Handle Callback').item.json.chatId, message_id: $('Handle Callback').item.json.messageId, reply_markup: { inline_keyboard: [] } }) }}",
+          "options": {
+            "timeout": 10000
+          }
+        },
+        "onError": "continueRegularOutput",
+        "id": "2576170c-9d81-43f9-a8e9-763810efbe6a"
+      }
+    ],
+    "connections": {
+      "Poll TG": {
+        "main": [
+          [
+            {
+              "node": "Get Offset",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Offset": {
+        "main": [
+          [
+            {
+              "node": "Get Updates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Updates": {
+        "main": [
+          [
+            {
+              "node": "Map Updates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Map Updates": {
+        "main": [
+          [
+            {
+              "node": "Ack Offset",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Dedup Updates": {
+        "main": [
+          [
+            {
+              "node": "Is Callback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Callback": {
+        "main": [
+          [
+            {
+              "node": "Handle Callback",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Parse Review",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Review": {
+        "main": [
+          [
+            {
+              "node": "RAG Search",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Qwen Draft": {
+        "main": [
+          [
+            {
+              "node": "Extract Draft",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Draft": {
+        "main": [
+          [
+            {
+              "node": "Build Msg",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Msg": {
+        "main": [
+          [
+            {
+              "node": "Send Draft",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Draft": {
+        "main": [
+          [
+            {
+              "node": "Save Offset Msg",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Handle Callback": {
+        "main": [
+          [
+            {
+              "node": "Answer Callback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Authorized": {
+        "main": [
+          [
+            {
+              "node": "Send Final",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Send Not Authorized",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Final": {
+        "main": [
+          [
+            {
+              "node": "Save Offset Ok",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Not Authorized": {
+        "main": [
+          [
+            {
+              "node": "Save Offset No",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "RAG Search": {
+        "main": [
+          [
+            {
+              "node": "Build Prompt",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Prompt": {
+        "main": [
+          [
+            {
+              "node": "Qwen Draft",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Ack Offset": {
+        "main": [
+          [
+            {
+              "node": "Restore Update",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Restore Update": {
+        "main": [
+          [
+            {
+              "node": "Dedup Updates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Answer Callback": {
+        "main": [
+          [
+            {
+              "node": "Restore Callback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Restore Callback": {
+        "main": [
+          [
+            {
+              "node": "Is Authorized",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Offset Ok": {
+        "main": [
+          [
+            {
+              "node": "Clear Buttons",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Divyesh Sharma",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-08-18T16:24:09.906Z",
+        "id": 41,
+        "workflowId": "ELk9R3m7jeGK5VAF",
+        "versionId": "54e73d4e-0db3-4c88-b201-26d24d510626",
+        "event": "activated",
+        "userId": "86cb99bf-d98e-4730-9378-98908dd9601d"
+      },
+      {
+        "createdAt": "2026-08-18T16:24:09.801Z",
+        "id": 40,
+        "workflowId": "ELk9R3m7jeGK5VAF",
+        "versionId": "54e73d4e-0db3-4c88-b201-26d24d510626",
+        "event": "deactivated",
+        "userId": "86cb99bf-d98e-4730-9378-98908dd9601d"
+      }
+    ]
+  }
+}

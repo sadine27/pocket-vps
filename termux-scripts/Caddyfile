@@ -1,0 +1,60 @@
+# Pocket VPS — Caddy Reverse Proxy
+{
+    # port 80 is privileged on Android — no automatic HTTP->HTTPS redirect servers
+    auto_https disable_redirects
+}
+
+:8080 {
+    # n8n automation
+    handle_path /n8n/* {
+        reverse_proxy localhost:5678
+    }
+
+    # File server
+    handle_path /files/* {
+        reverse_proxy localhost:3000
+    }
+
+    # n8n health check (frontend polls this)
+    handle /healthz {
+        reverse_proxy localhost:5678
+    }
+
+    # Everything else → landing page
+    handle {
+        root * /data/data/com.termux/files/home/server/site
+        file_server
+    }
+}
+
+# HTTPS entry — Google-approved redirect URI for n8n OAuth
+# cert: Let's Encrypt via acme.sh (renewed from laptop, valid until 2026-11-11)
+https://YOUR-SUBDOMAIN.duckdns.org:8443 {
+    tls /data/data/com.termux/files/home/server/certs/fullchain.pem /data/data/com.termux/files/home/server/certs/key.pem
+
+    # n8n automation (prefix stripped)
+    handle_path /n8n/* {
+        reverse_proxy localhost:5678
+    }
+
+    # File server
+    handle_path /files/* {
+        reverse_proxy localhost:3000
+    }
+
+    # n8n OAuth callback — Caddy strips /n8n, so n8n builds the callback without it
+    handle /rest/* {
+        reverse_proxy localhost:5678
+    }
+
+    # n8n health check
+    handle /healthz {
+        reverse_proxy localhost:5678
+    }
+
+    # Everything else → landing page
+    handle {
+        root * /data/data/com.termux/files/home/server/site
+        file_server
+    }
+}

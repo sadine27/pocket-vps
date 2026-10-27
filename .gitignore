@@ -1,0 +1,59 @@
+# ── Secrets — never commit ──────────────────────────────────────────────────
+.env
+*.pem
+*.key
+!*.pub.key
+authorized_keys
+known_hosts
+known_hosts.old
+gcp-info.txt
+telegram-info.txt
+n8n-api-key.txt
+**/certs/
+**/.acme.sh/
+
+# n8n's own data + credential store (encrypted, but never belongs in git)
+n8n-data/
+**/n8n-data/
+
+# Historical workflow backups / demo exports — several embed the live Telegram token
+review-bot/backups/
+demo-workflow*.json
+workflow-*.json
+
+# Server backups — assume these bundle every secret above until individually audited
+server-backup-*.tar.gz
+*.tar.gz
+
+# ── Runtime data / working state, not source ────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+rag-backup-*.db
+tg-offset.json
+.duckdns-last-ip
+boot.log
+*.log
+*-install*.log
+
+# ── Node / npm ───────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+.npm/
+package-lock.json.bak
+
+# ── pm2 ──────────────────────────────────────────────────────────────────────
+.pm2/
+
+# ── Large binaries / media not meant for the repo ────────────────────────────
+*.gguf
+*.apk
+*.mp4
+*.m4a
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
